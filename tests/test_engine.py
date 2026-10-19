@@ -1,3 +1,9 @@
+import sys
+from pathlib import Path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from src.engine.governed_engine import GovernedEngine
 
 def test_governed_engine():
@@ -38,7 +44,7 @@ def test_governed_engine():
         print("Profile:", brief["distributor"])
         print("Commercial:", brief["commercial"])
         print("Receivables:", brief["receivables"])
-        print("Stuck Credits Count:", len(brief["stuck_credits"]))
+        print("Pending Credits Count:", len(brief["pending_credits"]))
         assert brief["success"] is True
 
     print("\n>>> ALL GOVERNED ENGINE TESTS PASSED PERFECTLY! <<<")

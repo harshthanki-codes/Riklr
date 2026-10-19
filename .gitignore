@@ -1,3 +1,5 @@
-
 docs/
-
+__pycache__/
+*.pyc
+*.mp4
+*.mov
