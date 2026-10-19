@@ -58,10 +58,9 @@ def init_cleaning_layer(con: duckdb.DuckDBPyConnection):
           OR UPPER(TRIM(t.territory_code)) = c.legacy_code;
     """)
 
-    # 3. Clean sell-in orders
-    # Deduplicates on (order_id, line_id) and attaches canonical territory & region from distributors master
+    # 3. Clean sell-in orders (Materialize as TEMP TABLE for speed & memory efficiency)
     con.execute("""
-        CREATE OR REPLACE TEMP VIEW clean_sell_in AS
+        CREATE OR REPLACE TEMP TABLE clean_sell_in AS
         WITH deduped AS (
             SELECT 
                 order_id,
@@ -86,9 +85,9 @@ def init_cleaning_layer(con: duckdb.DuckDBPyConnection):
         SELECT * EXCLUDE (rn) FROM deduped WHERE rn = 1;
     """)
 
-    # 4. Clean returns
+    # 4. Clean returns (Materialize as TEMP TABLE)
     con.execute("""
-        CREATE OR REPLACE TEMP VIEW clean_returns AS
+        CREATE OR REPLACE TEMP TABLE clean_returns AS
         WITH deduped AS (
             SELECT 
                 return_id,
@@ -110,9 +109,9 @@ def init_cleaning_layer(con: duckdb.DuckDBPyConnection):
         SELECT * EXCLUDE (rn) FROM deduped WHERE rn = 1;
     """)
 
-    # 5. Clean schemes and credits
+    # 5. Clean schemes and credits (Materialize as TEMP TABLE)
     con.execute("""
-        CREATE OR REPLACE TEMP VIEW clean_credits AS
+        CREATE OR REPLACE TEMP TABLE clean_credits AS
         WITH deduped AS (
             SELECT 
                 credit_id,
