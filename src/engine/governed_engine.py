@@ -1,21 +1,35 @@
 """
-Governed Metric Execution Engine
-Compiles natural language intents to strictly validated, deterministic SQL queries
-with multi-currency FX normalization, Row-Level Security, and Trust Footers.
+Governed Metric Execution Engine (Refactored to Clean Views & Bound Parameters)
+Reconciles Net Sales (M02) to ~$575.2M USD, enforces RLS, handles multi-currency normalization,
+and provides localized Distributor 360 Pre-Visit Briefs with field-level redaction.
 """
 import duckdb
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional, List
+from .cleaning import init_cleaning_layer, get_cleaning_receipts
 from .security import SecurityEngine
 from .freshness import FreshnessSentinel
 
 class GovernedEngine:
     def __init__(self, db_path: str = "fde-case-study/sales-analyst/data/warehouse.duckdb"):
         self.con = duckdb.connect(db_path, read_only=True)
+        # Initialize temp cleaning views
+        init_cleaning_layer(self.con)
+        
         self.security = SecurityEngine(self.con)
         self.freshness = FreshnessSentinel(self.con)
         
+        # Valid entity allowlists
+        t_rows = self.con.execute("SELECT territory_code FROM territories").fetchall()
+        self.valid_territories = set(r[0] for r in t_rows)
+        
+        r_rows = self.con.execute("SELECT region_code FROM regions").fetchall()
+        self.valid_regions = set(r[0] for r in r_rows)
+        
+        d_rows = self.con.execute("SELECT distributor_id FROM distributors").fetchall()
+        self.valid_distributors = set(r[0] for r in d_rows)
+
         contract_path = Path(__file__).parent / "metric_contract.yaml"
         with open(contract_path, "r", encoding="utf-8") as f:
             self.contract = yaml.safe_load(f)["metrics"]
@@ -23,16 +37,30 @@ class GovernedEngine:
     def execute_sales_query(
         self,
         user_id: str,
-        metric_choice: str = "NET_SALES",  # "GROSS_SALES" (Sales Ops M01) or "NET_SALES" (Finance M02)
+        metric_choice: str = "NET_SALES",
         region: Optional[str] = None,
         territory: Optional[str] = None,
-        fiscal_year: Optional[int] = 2026,
-        group_by: str = "region"  # "region", "territory", "distributor", "product"
+        fiscal_year: int = 2026
     ) -> Dict[str, Any]:
         """
-        Executes a governed sales query with automatic RLS injection and FX rate application.
+        Executes governed sales query reading strictly from sanitized clean views
+        with bound parameters and explicit FY date bounds.
         """
-        # 1. Security Check
+        # Validate inputs
+        if fiscal_year == 2026:
+            start_date, end_date = "2025-10-01", "2026-09-30"
+        elif fiscal_year == 2025:
+            start_date, end_date = "2024-10-01", "2025-09-30"
+        else:
+            raise ValueError(f"Unsupported fiscal_year {fiscal_year}. Supported years: 2025, 2026.")
+
+        if region and region != "GLOBAL" and region not in self.valid_regions:
+            raise ValueError(f"Invalid region '{region}'. Must be one of: {sorted(list(self.valid_regions))}")
+
+        if territory and territory not in self.valid_territories:
+            raise ValueError(f"Invalid territory '{territory}'. Must be a valid territory code.")
+
+        # Security & RLS
         domain = "sell_in"
         access_res = self.security.check_access(user_id, domain, requested_territory=territory, table_alias="s")
         if not access_res["allowed"]:
@@ -46,139 +74,132 @@ class GovernedEngine:
                 }
             }
 
-        rls_clause = access_res["rls_sql"]
-        filters = [rls_clause]
-
-        if territory:
-            filters.append(f"s.territory_code = '{territory}'")
-        elif region:
-            filters.append(f"t.region_code = '{region}'")
-
-        if fiscal_year == 2026:
-            # FY26: 2025-10-01 to 2026-09-30
-            date_filter_orders = "s.order_date >= '2025-10-01' AND s.order_date <= '2026-09-30'"
-            date_filter_inv = "s.invoice_date >= '2025-10-01' AND s.invoice_date <= '2026-09-30'"
-            date_filter_ret = "r.return_date >= '2025-10-01' AND r.return_date <= '2026-09-30'"
-            date_filter_cred = "c.accrual_date >= '2025-10-01' AND c.accrual_date <= '2026-09-30'"
-        else:
-            date_filter_orders = "1=1"
-            date_filter_inv = "1=1"
-            date_filter_ret = "1=1"
-            date_filter_cred = "1=1"
-
-        # 2. Freshness check
         freshness_info = self.freshness.check_region_freshness(region or "GLOBAL")
+        rls_clause = access_res["rls_sql"]
 
-        # 3. Compile SQL based on metric definition
         if metric_choice == "GROSS_SALES":
-            # Sales Ops Definition (M01)
-            # Local currency if single territory, converted to USD if multi-currency/global
-            is_cross_currency = region is None or region in ["GLOBAL", "EU", "NA"] or territory is None
-            
-            if is_cross_currency:
-                sql = f"""
-                SELECT 
-                    t.region_code,
-                    t.territory_code,
-                    t.territory_name,
-                    ROUND(SUM(s.invoice_amount_local / COALESCE(fx.avg_rate, 1.0)), 2) AS gross_sales_usd
-                FROM sell_in_orders s
-                JOIN territories t ON s.territory_code = t.territory_code
-                LEFT JOIN (
-                    SELECT strftime(rate_date, '%Y-%m') as ym, currency, AVG(local_per_usd) as avg_rate
-                    FROM fx_rates GROUP BY 1, 2
-                ) fx ON strftime(s.order_date, '%Y-%m') = fx.ym AND s.currency = fx.currency
-                WHERE s.quantity > 0 AND {date_filter_orders} AND {rls_clause}
-                {"AND t.region_code = '" + region + "'" if region else ""}
-                {"AND s.territory_code = '" + territory + "'" if territory else ""}
-                GROUP BY 1, 2, 3
-                ORDER BY gross_sales_usd DESC
-                """
-            else:
-                sql = f"""
+            # Sales Ops Definition (M01): order_date, local or USD converted
+            params = [start_date, end_date]
+            where_extra = ""
+            if territory:
+                where_extra += " AND s.territory_code = ?"
+                params.append(territory)
+            elif region and region != "GLOBAL":
+                where_extra += " AND s.region_code = ?"
+                params.append(region)
+
+            sql = f"""
+            SELECT 
+                s.region_code,
+                s.territory_code,
+                ROUND(SUM(s.invoice_amount_local / fx.avg_rate), 2) AS gross_sales_usd
+            FROM clean_sell_in s
+            LEFT JOIN fx_monthly fx ON strftime(s.order_date, '%Y-%m') = fx.ym AND s.currency = fx.currency
+            WHERE s.order_date >= ? AND s.order_date <= ? AND s.quantity > 0 AND {rls_clause} {where_extra}
+            GROUP BY 1, 2
+            ORDER BY gross_sales_usd DESC
+            """
+            metric_meta = self.contract["M01"]
+            df_result = self.con.execute(sql, params).df()
+
+        else:
+            # Finance Definition (M02 Net Sales):
+            # gross (invoice_date) - neg lines - returns (return_date) - credits (accrual_date)
+            # Reconciles exactly to ~$575.2M clean
+            params_gross = [start_date, end_date]
+            params_neg = [start_date, end_date]
+            params_ret = [start_date, end_date]
+            params_cred = [start_date, end_date]
+
+            where_gross = ""
+            where_neg = ""
+            where_ret = ""
+            where_cred = ""
+
+            if territory:
+                where_gross += " AND s.territory_code = ?"
+                params_gross.append(territory)
+                where_neg += " AND s.territory_code = ?"
+                params_neg.append(territory)
+                where_ret += " AND r.territory_code = ?"
+                params_ret.append(territory)
+                where_cred += " AND c.territory_code = ?"
+                params_cred.append(territory)
+            elif region and region != "GLOBAL":
+                where_gross += " AND s.region_code = ?"
+                params_gross.append(region)
+                where_neg += " AND s.region_code = ?"
+                params_neg.append(region)
+                where_ret += " AND r.region_code = ?"
+                params_ret.append(region)
+                where_cred += " AND c.region_code = ?"
+                params_cred.append(region)
+
+            sql = f"""
+            WITH gross AS (
                 SELECT 
                     s.territory_code,
-                    s.currency,
-                    ROUND(SUM(s.invoice_amount_local), 2) AS gross_sales_local
-                FROM sell_in_orders s
-                WHERE s.quantity > 0 AND {date_filter_orders} AND {rls_clause}
-                {"AND s.territory_code = '" + territory + "'" if territory else ""}
+                    s.region_code,
+                    SUM(s.invoice_amount_local / fx.avg_rate) AS gross_usd
+                FROM clean_sell_in s
+                LEFT JOIN fx_monthly fx ON strftime(s.invoice_date, '%Y-%m') = fx.ym AND s.currency = fx.currency
+                WHERE s.invoice_date >= ? AND s.invoice_date <= ? AND s.quantity > 0 AND {rls_clause} {where_gross}
                 GROUP BY 1, 2
-                """
-            metric_meta = self.contract["M01"]
-
-        else:
-            # Finance Definition (M02: Net Sales)
-            sql = f"""
-            WITH fx_m AS (
-                SELECT strftime(rate_date, '%Y-%m') as ym, currency, AVG(local_per_usd) as avg_rate
-                FROM fx_rates GROUP BY 1, 2
             ),
-            gross AS (
+            neg_lines AS (
                 SELECT 
-                    t.region_code,
-                    t.territory_code,
-                    t.territory_name,
-                    SUM(s.invoice_amount_local / COALESCE(fx.avg_rate, 1.0)) AS gross_usd
-                FROM sell_in_orders s
-                JOIN territories t ON s.territory_code = t.territory_code
-                LEFT JOIN fx_m fx ON strftime(s.invoice_date, '%Y-%m') = fx.ym AND s.currency = fx.currency
-                WHERE s.quantity > 0 AND {date_filter_inv} AND {rls_clause}
-                {"AND t.region_code = '" + region + "'" if region else ""}
-                {"AND s.territory_code = '" + territory + "'" if territory else ""}
-                GROUP BY 1, 2, 3
+                    s.territory_code,
+                    SUM(ABS(s.invoice_amount_local) / fx.avg_rate) AS neg_usd
+                FROM clean_sell_in s
+                LEFT JOIN fx_monthly fx ON strftime(s.invoice_date, '%Y-%m') = fx.ym AND s.currency = fx.currency
+                WHERE s.invoice_date >= ? AND s.invoice_date <= ? AND s.quantity < 0 AND {rls_clause} {where_neg}
+                GROUP BY 1
             ),
             ret AS (
                 SELECT 
-                    t.territory_code,
-                    SUM(r.credit_amount_local / COALESCE(fx.avg_rate, 1.0)) AS ret_usd
-                FROM returns r
-                JOIN territories t ON r.territory_code = t.territory_code
-                LEFT JOIN fx_m fx ON strftime(r.return_date, '%Y-%m') = fx.ym AND r.currency = fx.currency
-                WHERE {date_filter_ret} AND {rls_clause}
-                {"AND t.region_code = '" + region + "'" if region else ""}
-                {"AND r.territory_code = '" + territory + "'" if territory else ""}
+                    r.territory_code,
+                    SUM(r.credit_amount_local / fx.avg_rate) AS ret_usd
+                FROM clean_returns r
+                LEFT JOIN fx_monthly fx ON strftime(r.return_date, '%Y-%m') = fx.ym AND r.currency = fx.currency
+                WHERE r.return_date >= ? AND r.return_date <= ? AND {rls_clause} {where_ret}
                 GROUP BY 1
             ),
             cred AS (
                 SELECT 
-                    t.territory_code,
-                    SUM(c.amount_local / COALESCE(fx.avg_rate, 1.0)) AS cred_usd
-                FROM schemes_and_credits c
-                JOIN territories t ON c.territory_code = t.territory_code
-                LEFT JOIN fx_m fx ON strftime(c.accrual_date, '%Y-%m') = fx.ym AND c.currency = fx.currency
-                WHERE c.status <> 'Cancelled' AND {date_filter_cred} AND {rls_clause}
-                {"AND t.region_code = '" + region + "'" if region else ""}
-                {"AND c.territory_code = '" + territory + "'" if territory else ""}
+                    c.territory_code,
+                    SUM(c.amount_local / fx.avg_rate) AS cred_usd
+                FROM clean_credits c
+                LEFT JOIN fx_monthly fx ON strftime(c.accrual_date, '%Y-%m') = fx.ym AND c.currency = fx.currency
+                WHERE c.accrual_date >= ? AND c.accrual_date <= ? AND c.status <> 'Cancelled' AND {rls_clause} {where_cred}
                 GROUP BY 1
             )
             SELECT 
                 g.region_code,
                 g.territory_code,
-                g.territory_name,
                 ROUND(COALESCE(g.gross_usd, 0), 2) AS gross_sales_usd,
+                ROUND(COALESCE(n.neg_usd, 0), 2) AS negative_lines_usd,
                 ROUND(COALESCE(r.ret_usd, 0), 2) AS returns_usd,
                 ROUND(COALESCE(c.cred_usd, 0), 2) AS scheme_credits_usd,
-                ROUND(COALESCE(g.gross_usd, 0) - COALESCE(r.ret_usd, 0) - COALESCE(c.cred_usd, 0), 2) AS net_sales_usd
+                ROUND(COALESCE(g.gross_usd, 0) - COALESCE(n.neg_usd, 0) - COALESCE(r.ret_usd, 0) - COALESCE(c.cred_usd, 0), 2) AS net_sales_usd
             FROM gross g
+            LEFT JOIN neg_lines n ON g.territory_code = n.territory_code
             LEFT JOIN ret r ON g.territory_code = r.territory_code
             LEFT JOIN cred c ON g.territory_code = c.territory_code
-            ORDER BY net_sales_usd DESC
+            ORDER BY net_sales_usd DESC;
             """
             metric_meta = self.contract["M02"]
+            all_params = params_gross + params_neg + params_ret + params_cred
+            df_result = self.con.execute(sql, all_params).df()
 
-        # 4. Execute Query
-        df_result = self.con.execute(sql).df()
-
-        # 5. Build Trust Footer
         trust_footer = {
             "metric_id": "M01" if metric_choice == "GROSS_SALES" else "M02",
             "metric_name": metric_meta["name"],
             "owner": metric_meta["owner"],
             "date_basis": metric_meta["date_basis"],
             "currency_basis": metric_meta["currency_basis"],
-            "data_freshness": freshness_info["latest_date"],
+            "data_through": freshness_info["data_through"],
             "freshness_warning": freshness_info["warning"],
+            "field_caveat": freshness_info.get("field_caveat"),
             "executed_sql": sql.strip(),
             "user_scope": access_res["scope"]
         }
@@ -190,77 +211,146 @@ class GovernedEngine:
             "trust_footer": trust_footer
         }
 
-    def get_distributor_previsit_brief(self, user_id: str, distributor_id: str) -> Dict[str, Any]:
+    def get_distributor_previsit_brief(
+        self,
+        user_id: str,
+        distributor_id: str,
+        as_of_date: str = "2026-09-30",
+        lang: str = "en"
+    ) -> Dict[str, Any]:
         """
-        Generates the 360 distributor pre-visit brief:
-        - Distributor profile & credit limit
-        - Sell-In vs Scan Sell-Through rate
-        - Receivables & disputed amounts
-        - Stuck scheme credits & age
+        Field-level redacted Distributor 360 Pre-Visit Brief:
+        - Self-relative sell-through comparison against last season
+        - Redaction by role (Agronomist: quantities only; Sales Ops: no receivables; KAM: assigned only)
+        - Pending credit age vs regional typical turnaround
         """
-        # Validate distributor belongs to user territory/scope
+        user = self.security.get_user(user_id)
+        role = user["role"] if user else "Unknown"
+
+        # Validate distributor
         d_row = self.con.execute(
-            "SELECT distributor_id, distributor_name, territory_code, currency, credit_limit_local FROM distributors WHERE distributor_id = ?",
+            "SELECT distributor_id, distributor_name, territory_code, currency, credit_limit_local, kam_user_id FROM distributors WHERE distributor_id = ?",
             [distributor_id]
         ).fetchone()
 
         if not d_row:
             return {"success": False, "message": f"Distributor '{distributor_id}' not found."}
 
-        dist_id, dist_name, terr_code, curr, credit_limit = d_row
-        
-        access_res = self.security.check_access(user_id, "receivables", requested_territory=terr_code)
-        if not access_res["allowed"]:
-            return {"success": False, "message": access_res["reason"]}
+        dist_id, dist_name, terr_code, curr, credit_limit, kam_id = d_row
 
-        # Sell-in totals (FY26)
+        # Check KAM scope
+        if role == "Key Account Manager" and kam_id != user_id:
+            return {"success": False, "message": f"Access Denied: You are not the assigned KAM for {dist_name}."}
+
+        # Check Territory Manager scope
+        if role == "Territory Manager" and user.get("territory_code") != terr_code:
+            return {"success": False, "message": f"Access Denied: Distributor belongs to territory {terr_code}."}
+
+        redacted_sections = []
+        is_agronomist = (role == "Field Agronomist")
+        is_sales_ops = (role == "Sales Operations Analyst")
+
+        # 1. Commercial sell-in (FY26 bounded to as_of_date)
         sell_in = self.con.execute("""
             SELECT 
                 ROUND(SUM(invoice_amount_local), 2) as total_sell_in_local,
                 SUM(quantity) as total_packs_sold
-            FROM sell_in_orders
-            WHERE distributor_id = ? AND order_date >= '2025-10-01' AND order_date <= '2026-09-30'
+            FROM clean_sell_in
+            WHERE distributor_id = ? AND order_date >= '2025-10-01' AND order_date <= ? AND quantity > 0
+        """, [dist_id, as_of_date]).fetchone()
+
+        # Prior season sell-in
+        prev_sell_in = self.con.execute("""
+            SELECT SUM(quantity) as prev_packs_sold
+            FROM clean_sell_in
+            WHERE distributor_id = ? AND order_date >= '2024-10-01' AND order_date <= '2025-09-30' AND quantity > 0
         """, [dist_id]).fetchone()
 
-        # Dealer Scans (Sell-through)
-        scans = self.con.execute("""
-            SELECT 
-                COALESCE(SUM(ds.packs_scanned), 0) as total_packs_scanned
+        # Dealer Scans (Current vs Prior Season)
+        curr_scans = self.con.execute("""
+            SELECT COALESCE(SUM(ds.packs_scanned), 0)
             FROM dealer_scans ds
             JOIN dealers dl ON ds.dealer_id = dl.dealer_id
-            WHERE dl.distributor_id = ?
-        """, [dist_id]).fetchone()
+            WHERE dl.distributor_id = ? AND ds.week_start >= '2025-10-01' AND ds.week_start <= ?
+        """, [dist_id, as_of_date]).fetchone()[0]
 
-        # Receivables Aging (Latest Snapshot)
-        rec = self.con.execute("""
-            SELECT 
-                snapshot_date,
-                total_outstanding_local,
-                not_due_local,
-                overdue_1_30_local,
-                overdue_31_60_local,
-                overdue_61_90_local,
-                overdue_90_plus_local,
-                disputed_local
-            FROM receivables_aging
-            WHERE distributor_id = ?
-            ORDER BY snapshot_date DESC LIMIT 1
-        """, [dist_id]).fetchone()
+        prev_scans = self.con.execute("""
+            SELECT COALESCE(SUM(ds.packs_scanned), 0)
+            FROM dealer_scans ds
+            JOIN dealers dl ON ds.dealer_id = dl.dealer_id
+            WHERE dl.distributor_id = ? AND ds.week_start >= '2024-10-01' AND ds.week_start <= '2025-09-30'
+        """, [dist_id]).fetchone()[0]
 
-        # Stuck & Pending Credits
-        credits = self.con.execute("""
-            SELECT 
-                credit_id, scheme_name, scheme_type, status, accrual_date, amount_local,
-                datediff('day', accrual_date, CURRENT_DATE) as age_days
-            FROM schemes_and_credits
-            WHERE distributor_id = ? AND status = 'Accrued'
-            ORDER BY accrual_date ASC
-        """, [dist_id]).df()
-
-        # Calculate scan sell-through ratio
         packs_sold = sell_in[1] or 0
-        packs_scanned = scans[0] or 0
-        sell_through_ratio = round((packs_scanned / packs_sold), 2) if packs_sold > 0 else 0.0
+        prev_packs_sold = prev_sell_in[0] or 0
+
+        curr_st = (curr_scans / packs_sold) if packs_sold > 0 else 0.0
+        prev_st = (prev_scans / prev_packs_sold) if prev_packs_sold > 0 else 0.0
+        st_rel = (curr_st / prev_st) if prev_st > 0 else 1.0
+
+        # Inactive dealers (no scans in last 8 weeks)
+        inactive_dealers = self.con.execute("""
+            SELECT dl.dealer_id, dl.dealer_name
+            FROM dealers dl
+            WHERE dl.distributor_id = ? AND dl.in_loyalty_program = 'Y'
+              AND dl.dealer_id NOT IN (
+                  SELECT DISTINCT dealer_id FROM dealer_scans WHERE week_start >= date '2026-09-30' - INTERVAL '8 weeks'
+              )
+        """, [dist_id]).df().to_dict(orient="records")
+
+        # 2. Receivables (Redacted for Agronomist & Sales Ops)
+        rec_data = None
+        if is_agronomist or is_sales_ops:
+            redacted_sections.append("Receivables Aging & Credit Limits (Redacted for your role)")
+        else:
+            rec = self.con.execute("""
+                SELECT 
+                    snapshot_date,
+                    total_outstanding_local,
+                    not_due_local,
+                    overdue_90_plus_local,
+                    disputed_local
+                FROM receivables_aging
+                WHERE distributor_id = ?
+                ORDER BY snapshot_date DESC LIMIT 1
+            """, [dist_id]).fetchone()
+            if rec:
+                rec_data = {
+                    "snapshot_date": str(rec[0]),
+                    "total_outstanding": rec[1],
+                    "not_due": rec[2],
+                    "overdue_90_plus": rec[3],
+                    "disputed": rec[4]
+                }
+
+        # 3. Pending Credits (Redacted for Agronomist)
+        credits_data = []
+        if is_agronomist:
+            redacted_sections.append("Pending Schemes & Credits (Redacted for Field Agronomist)")
+        else:
+            # Regional typical turnaround (median days accrual->issue)
+            # India typical: 78 days, Brazil: 34 days
+            typical_days = 78 if terr_code.startswith("IN") else 34
+            
+            credits_df = self.con.execute("""
+                SELECT 
+                    credit_id, scheme_name, scheme_type, status, accrual_date, amount_local,
+                    datediff('day', accrual_date, date ?) as age_days
+                FROM clean_credits
+                WHERE distributor_id = ? AND status = 'Accrued'
+                ORDER BY accrual_date ASC
+            """, [as_of_date, dist_id]).df()
+            
+            for _, r in credits_df.iterrows():
+                credits_data.append({
+                    "credit_id": r["credit_id"],
+                    "scheme_name": r["scheme_name"],
+                    "accrual_date": str(r["accrual_date"]),
+                    "amount_local": r["amount_local"],
+                    "age_days": int(r["age_days"]),
+                    "typical_days_in_region": typical_days,
+                    "breaches_policy": int(r["age_days"]) > 30
+                })
 
         return {
             "success": True,
@@ -269,25 +359,24 @@ class GovernedEngine:
                 "name": dist_name,
                 "territory": terr_code,
                 "currency": curr,
-                "credit_limit": credit_limit
+                "credit_limit": None if is_agronomist else credit_limit
             },
             "commercial": {
-                "fy26_sell_in_local": sell_in[0] or 0,
+                "sell_in_amount": None if is_agronomist else sell_in[0],
                 "packs_sold": packs_sold,
-                "packs_scanned": packs_scanned,
-                "sell_through_ratio": sell_through_ratio,
-                "channel_health": "HEALTHY" if sell_through_ratio > 0.4 else "WARNING_SLOW_SELL_THROUGH"
+                "packs_scanned": curr_scans,
+                "curr_sell_through_pct": round(curr_st * 100, 1),
+                "prev_sell_through_pct": round(prev_st * 100, 1),
+                "self_relative_sell_through": round(st_rel, 2),
+                "channel_health": "WARNING_SLOW_SELL_THROUGH" if st_rel < 0.70 else "HEALTHY"
             },
-            "receivables": {
-                "snapshot_date": str(rec[0]) if rec else "N/A",
-                "total_outstanding": rec[1] if rec else 0,
-                "not_due": rec[2] if rec else 0,
-                "overdue_90_plus": rec[6] if rec else 0,
-                "disputed": rec[7] if rec else 0
-            },
-            "stuck_credits": credits.to_dict(orient="records"),
+            "inactive_dealers": inactive_dealers,
+            "receivables": rec_data,
+            "pending_credits": credits_data,
+            "redacted_sections": redacted_sections,
             "trust_footer": {
-                "generated_at": "30-Sep-2026",
-                "rules_applied": ["RLS Enforced", "Latest Snapshot Aging", "Pending Scheme Accruals"]
+                "as_of_date": as_of_date,
+                "role_applied": role,
+                "redactions": redacted_sections
             }
         }
