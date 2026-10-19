@@ -1,0 +1,127 @@
+# Semantic Metric Definitions & Governance Contract
+# Version 1.0 - Built for Governed Data Engine
+
+metrics:
+  M01:
+    name: "Gross Sales (Sales Ops)"
+    owner: "Sales Operations"
+    description: "Gross sell-in invoiced to distributors after on-invoice discount. Returns and credit notes are NOT deducted."
+    date_basis: "order_date"
+    currency_basis: "local"
+    allowed_domains: ["sell_in"]
+    sql_template: |
+      SELECT 
+        {dimensions},
+        SUM(CASE WHEN quantity > 0 THEN invoice_amount_local ELSE 0 END) AS gross_sales_local,
+        currency
+      FROM sell_in_orders
+      WHERE 1=1 {filters}
+      GROUP BY {dimensions}, currency
+
+  M02:
+    name: "Net Sales (Finance)"
+    owner: "Finance"
+    description: "Gross invoiced sell-in minus returns credited minus scheme/rebate credit notes minus negative invoices. Converted to USD at transaction monthly average FX rate."
+    date_basis: "invoice_date (returns: return_date, credits: accrual_date)"
+    currency_basis: "USD"
+    allowed_domains: ["sell_in", "returns", "schemes_credits"]
+    sql_template: |
+      WITH gross_sales AS (
+        SELECT 
+          {dimensions_orders},
+          SUM(s.invoice_amount_local / COALESCE(fx.avg_rate, 1.0)) AS gross_usd
+        FROM sell_in_orders s
+        LEFT JOIN (
+          SELECT strftime(rate_date, '%Y-%m') as ym, currency, AVG(local_per_usd) as avg_rate
+          FROM fx_rates GROUP BY 1, 2
+        ) fx ON strftime(s.invoice_date, '%Y-%m') = fx.ym AND s.currency = fx.currency
+        WHERE s.quantity > 0 {filters_orders}
+        GROUP BY {dimensions_orders}
+      ),
+      returns_deduct AS (
+        SELECT 
+          {dimensions_returns},
+          SUM(r.credit_amount_local / COALESCE(fx.avg_rate, 1.0)) AS return_usd
+        FROM returns r
+        LEFT JOIN (
+          SELECT strftime(rate_date, '%Y-%m') as ym, currency, AVG(local_per_usd) as avg_rate
+          FROM fx_rates GROUP BY 1, 2
+        ) fx ON strftime(r.return_date, '%Y-%m') = fx.ym AND r.currency = fx.currency
+        WHERE 1=1 {filters_returns}
+        GROUP BY {dimensions_returns}
+      ),
+      credits_deduct AS (
+        SELECT 
+          {dimensions_credits},
+          SUM(c.amount_local / COALESCE(fx.avg_rate, 1.0)) AS credit_usd
+        FROM schemes_and_credits c
+        LEFT JOIN (
+          SELECT strftime(rate_date, '%Y-%m') as ym, currency, AVG(local_per_usd) as avg_rate
+          FROM fx_rates GROUP BY 1, 2
+        ) fx ON strftime(c.accrual_date, '%Y-%m') = fx.ym AND c.currency = fx.currency
+        WHERE c.status <> 'Cancelled' {filters_credits}
+        GROUP BY {dimensions_credits}
+      )
+      SELECT 
+        COALESCE(g.{join_dim}, r.{join_dim}, c.{join_dim}) as {join_dim},
+        COALESCE(g.gross_usd, 0) as gross_sales_usd,
+        COALESCE(r.return_usd, 0) as returns_usd,
+        COALESCE(c.credit_usd, 0) as schemes_rebates_usd,
+        (COALESCE(g.gross_usd, 0) - COALESCE(r.return_usd, 0) - COALESCE(c.credit_usd, 0)) AS net_sales_usd
+      FROM gross_sales g
+      FULL OUTER JOIN returns_deduct r ON g.{join_dim} = r.{join_dim}
+      FULL OUTER JOIN credits_deduct c ON COALESCE(g.{join_dim}, r.{join_dim}) = c.{join_dim}
+
+  M04:
+    name: "Target Achievement"
+    owner: "Sales Operations"
+    description: "Gross Sales (M01) divided by target for the same territory and period."
+    date_basis: "order_date"
+    currency_basis: "local"
+    allowed_domains: ["sell_in", "targets"]
+
+  M05:
+    name: "Return Rate (Volume/Qty)"
+    owner: "Sales Operations"
+    description: "Season returned packs divided by season gross sold packs."
+    date_basis: "order season"
+    currency_basis: "quantity"
+    allowed_domains: ["sell_in", "returns"]
+
+  M06:
+    name: "Return Rate (Value USD)"
+    owner: "Finance"
+    description: "Returns credited in period in USD divided by gross sales in period in USD."
+    date_basis: "return_date vs invoice_date"
+    currency_basis: "USD"
+    allowed_domains: ["sell_in", "returns"]
+
+  M07:
+    name: "Sell-Through Rate"
+    owner: "Loyalty Program"
+    description: "Packs scanned by enrolled dealers divided by distributor sell-in packs."
+    date_basis: "scan week vs order date"
+    currency_basis: "quantity"
+    allowed_domains: ["sell_in", "dealer_scans"]
+
+  M08:
+    name: "Receivables & Overdue"
+    owner: "Finance"
+    description: "Outstanding invoice value past due date, broken into aging buckets (1-30, 31-60, 61-90, 90+ days and disputed)."
+    date_basis: "snapshot_date"
+    currency_basis: "local or USD converted"
+    allowed_domains: ["receivables"]
+
+  M09:
+    name: "Active Distributors (Sales Ops)"
+    owner: "Sales Operations"
+    description: "Distributors with at least one order placed in the last 12 months."
+    date_basis: "order_date"
+    allowed_domains: ["sell_in"]
+
+  M10:
+    name: "Active Distributors (Finance)"
+    owner: "Finance"
+    description: "Distributors with an invoice in the fiscal year or non-zero balance at year end."
+    date_basis: "invoice_date / balance"
+    allowed_domains: ["sell_in", "receivables"]
