@@ -109,9 +109,10 @@ Per the formal requirements in `Riklr-FDE-Case-Study.pdf`, the complete submissi
 
 ## 5. Narrated Video Walkthrough
 
-- **Duration:** Under 4 minutes (per brief guidelines).
-- **Video Link:** [Watch Narrated Prototype Walkthrough on Google Drive](https://drive.google.com/file/d/REPLACE_WITH_YOUR_ACTUAL_DRIVE_LINK/view?usp=sharing)
-> *Note: Google Drive link permission is set to "Anyone with the link can view".*
+The complete narrated walkthrough demonstrating the problem context, isolated workflows, and live working prototype is included directly in this repository:
+- **Direct Video File in Repo:** [`walkthrough.mp4`](walkthrough.mp4) (46.4 MB — click to view or download directly from GitHub)
+- **Narrated Script Document:** [`script riklr.pdf`](file:///c:/Users/Admin/Desktop/script%20riklr.pdf) (Word-for-word cue sheet on Desktop)
+- **Optional Cloud Backup:** If accessing via mobile or slow connection, you can also view the video on [Google Drive Mirror](https://drive.google.com/file/d/REPLACE_WITH_YOUR_ACTUAL_DRIVE_LINK/view?usp=sharing) *(Permission: Anyone with the link can view)*.
 
 ---
 
