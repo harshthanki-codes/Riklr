@@ -4,6 +4,7 @@
 **Client:** Global Crop Protection, Seeds & Biologicals Corporation (North America, Brazil, Europe, India)  
 **Assessed By:** Riklr Forward Deployed Engineering Evaluation Committee  
 **GitHub Collaborator Invited:** `rr-riklr`  
+**Video Walkthrough (Google Drive):** [https://drive.google.com/file/d/1HHB5vycICn5DXzOQ2WfLMxMBebHzAPXg/view?usp=drive_link](https://drive.google.com/file/d/1HHB5vycICn5DXzOQ2WfLMxMBebHzAPXg/view?usp=drive_link)  
 
 ---
 
@@ -37,7 +38,7 @@ Per the formal requirements in `Riklr-FDE-Case-Study.pdf`, the complete submissi
 | **2. Notes on Research & Assumptions** | [`NOTES.md`](file:///c:/Users/Admin/Desktop/Riklr/NOTES.md) | Deep stakeholder analysis, workflow mapping, forensic warehouse audit, mathematical proofs, and FDE rollout roadmap. |
 | **3. Executive Deck (10 Slides)** | [`Riklr_Sales_Analyst_Deck.pptx`](file:///c:/Users/Admin/Desktop/Riklr/Riklr_Sales_Analyst_Deck.pptx) & [`.pdf`](file:///c:/Users/Admin/Desktop/Riklr/Riklr_Sales_Analyst_Deck.pdf) | McKinsey/Palantir-style 16:9 executive presentation in both PowerPoint and PDF formats (strictly 10 slides). |
 | **4. Coding Harness & Prompts** | [`chat-history/PROMPTS.md`](file:///c:/Users/Admin/Desktop/Riklr/chat-history/PROMPTS.md) & [`session_transcript.jsonl`](file:///c:/Users/Admin/Desktop/Riklr/chat-history/session_transcript.jsonl) | Senior Prompt Harness Engineer documentation, system prompts, few-shot contracts, and 50-Prompt Gold Standard Evaluation Suite. |
-| **5. Narrated Video Walkthrough** | [Google Drive Link Section Below](#5-narrated-video-walkthrough) | 4-minute narrated video walkthrough demonstrating problem context, isolated workflows, and live working prototype. |
+| **5. Narrated Video Walkthrough** | [Google Drive Stream Link](https://drive.google.com/file/d/1HHB5vycICn5DXzOQ2WfLMxMBebHzAPXg/view?usp=drive_link) & [`walkthrough.mp4`](walkthrough.mp4) | Narrated live video demo walking through problem context, isolated workflows, and the working prototype. |
 
 ---
 
@@ -109,10 +110,10 @@ Per the formal requirements in `Riklr-FDE-Case-Study.pdf`, the complete submissi
 
 ## 5. Narrated Video Walkthrough
 
-The complete narrated walkthrough demonstrating the problem context, isolated workflows, and live working prototype is included directly in this repository:
-- **Direct Video File in Repo:** [`walkthrough.mp4`](walkthrough.mp4) (46.4 MB — click to view or download directly from GitHub)
+The complete narrated walkthrough demonstrating the problem context, isolated workflows, and live working prototype is available via:
+- **Instant Cloud Streaming (Recommended):** [Watch Narrated Prototype Walkthrough on Google Drive](https://drive.google.com/file/d/1HHB5vycICn5DXzOQ2WfLMxMBebHzAPXg/view?usp=drive_link) *(Permission: Anyone with the link can view)*
+- **Direct Video File in Repository:** [`walkthrough.mp4`](walkthrough.mp4) (46.4 MB — committed directly in repo root)
 - **Narrated Script Document:** [`script riklr.pdf`](file:///c:/Users/Admin/Desktop/script%20riklr.pdf) (Word-for-word cue sheet on Desktop)
-- **Optional Cloud Backup:** If accessing via mobile or slow connection, you can also view the video on [Google Drive Mirror](https://drive.google.com/file/d/REPLACE_WITH_YOUR_ACTUAL_DRIVE_LINK/view?usp=sharing) *(Permission: Anyone with the link can view)*.
 
 ---
 
