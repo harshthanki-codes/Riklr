@@ -14,6 +14,10 @@ from .freshness import FreshnessSentinel
 class GovernedEngine:
     def __init__(self, db_path: str = "fde-case-study/sales-analyst/data/warehouse.duckdb"):
         self.con = duckdb.connect(db_path, read_only=True)
+        # Allocate ample RAM and threads for in-memory analytical CTEs
+        self.con.execute("PRAGMA memory_limit='2GB'")
+        self.con.execute("PRAGMA threads=4")
+        
         # Initialize temp cleaning views
         init_cleaning_layer(self.con)
         
@@ -335,7 +339,7 @@ class GovernedEngine:
             credits_df = self.con.execute("""
                 SELECT 
                     credit_id, scheme_name, scheme_type, status, accrual_date, amount_local,
-                    datediff('day', accrual_date, date ?) as age_days
+                    datediff('day', accrual_date, CAST(? AS DATE)) as age_days
                 FROM clean_credits
                 WHERE distributor_id = ? AND status = 'Accrued'
                 ORDER BY accrual_date ASC
