@@ -79,17 +79,19 @@ class FreshnessSentinel:
             }
 
         reg_date = self.regional_dates.get(region_code, self.global_latest)
-        lag_days = (datetime.strptime(str(self.global_latest), '%Y-%m-%d') - datetime.strptime(str(reg_date), '%Y-%m-%d')).days
+        reg_date_str = str(reg_date)[:10]
+        global_date_str = str(self.global_latest)[:10]
+        lag_days = (datetime.strptime(global_date_str, '%Y-%m-%d') - datetime.strptime(reg_date_str, '%Y-%m-%d')).days
 
         if lag_days > 0:
             warning_msg = (
-                f"{region_code} sell-in is current to {reg_date} ({lag_days} days behind other regions); "
+                f"{region_code} sell-in is current to {reg_date_str} ({lag_days} days behind other regions); "
                 f"{self.br_success_loads} of {self.br_total_loads} loads since 10 Aug succeeded; "
                 f"receivables last snapshot {self.br_aging_latest}."
             )
             return {
                 "freshness_status": "STALE_WARNING",
-                "data_through": str(reg_date),
+                "data_through": reg_date_str,
                 "lag_days": lag_days,
                 "warning": warning_msg,
                 "field_caveat": "Orders taken on messaging apps may not be keyed into the ERP for up to 2 days."
